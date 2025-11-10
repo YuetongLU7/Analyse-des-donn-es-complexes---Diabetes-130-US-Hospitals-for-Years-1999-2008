@@ -1,1 +1,1 @@
-## Author: Guilherme Peres Tatagiba  & Yuetong Lu ##
+## Author: # Rim El Fatihi & Guilherme Peres Tatagiba  & Yuetong Lu ##
