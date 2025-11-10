@@ -1,5 +1,5 @@
 # Project: Diabetes Hospital Dataset Analysis
-# Authors: Yuetong Lu & Guilherme Peres Tatagiba
+# Authors: Rim El Fatihi & Yuetong Lu & Guilherme Peres Tatagiba
 
 library(FactoMineR)
 
