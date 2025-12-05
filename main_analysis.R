@@ -469,14 +469,16 @@ resultats_rf <- tests_BH(diab_rf, "RF Imputation")
 graphics.off() 
 
 diab <- diab_knn
+# diab <- diab_em
+
 diab$readmit_binary <- factor(diab$readmit_binary, levels = c(0,1))
 
 # Preprocessing
 drugs <- c("metformin","repaglinide","nateglinide","chlorpropamide",
            "glimepiride","acetohexamide","glipizide","glyburide",
            "tolbutamide","pioglitazone","rosiglitazone","acarbose",
-           "miglitol","troglitazone","tolazamide","examide", 
-           "citoglipton","insulin","glyburide-metformin","glipizide-metformin",
+           "miglitol","troglitazone","tolazamide", 
+          "insulin","glyburide-metformin","glipizide-metformin",
            "glimepiride-pioglitazone","metformin-rosiglitazone","metformin-pioglitazone")
 
 diabetes_sample <- diabetes[sample(nrow(diabetes), 20000), ]   # Échantillonnez 20,000 lignes pour éviter un temps d’exécution excessivement long
@@ -487,40 +489,99 @@ results <- lapply(drugs, function(d) {
     data.frame(drug=d, value=names(prop), prop=as.vector(prop))
   }
 })
-
 do.call(rbind, results)
 
-# Tous les médicaments dont le taux d'utilisation dépassait 5 % ont été conservés 
-# car ils offraient une variabilité suffisante pour que le modèle puisse apprendre.
+map <- function(x) {
+  case_when(
+    x == "No" ~ 0,
+    x == "Steady" ~ 1,
+    x == "Down" ~ 2,
+    x == "Up" ~ 3,
+    TRUE ~ 0 # default
+  )
+}
+# mutate and across of dplyr
+drugs <- intersect(drugs, names(diab))
+diab <- diab %>%
+  mutate(across(all_of(drugs), map))
+# Show p value of each drug
+drugs_pvalue <- data.frame(Drug = character(), P_Value = numeric(), stringsAsFactors = FALSE)
 
-# Keep major drugs like Insulin, Metformin, Glipizide, Glyburide.
-cols_to_remove <- c(
-  "encounter_id", "patient_nbr", # IDs
-  "weight", "payer_code", "medical_specialty", # Too many NAs / Uninformative
+for(d in drugs) {
+  temp_factor <- as.factor(diab[[d]])
+  # table: drug levels × readmission (0/1)
+  tbl <- table(temp_factor, diab$readmit_binary)
   
-  # Sparse/Low-Value Drugs
-  "repaglinide", "nateglinide", "chlorpropamide",
-  "acetohexamide", "tolbutamide", "acarbose",
-  "miglitol", "troglitazone", "tolazamide", 
-  "examide", "citoglipton", # Often zero-variance
-  
-  # Combination Drugs
-  "glyburide.metformin", "glipizide.metformin", 
-  "metformin.rosiglitazone", "metformin.pioglitazone"
+  # chi-square
+  if(nrow(tbl) > 1 && ncol(tbl) > 1 && sum(tbl) > 0) {
+    # reduce warning
+    test <- suppressWarnings(chisq.test(tbl))
+    drugs_pvalue <- rbind(drugs_pvalue, data.frame(Drug = d, P_Value = test$p.value))
+  } else {
+    # If chi-square cannot be computed, it assigns p = 1.0 (no significance)
+    drugs_pvalue <- rbind(drugs_pvalue, data.frame(Drug = d, P_Value = 1.0))
+  }
+}
+
+drugs_pvalue <- drugs_pvalue[order(drugs_pvalue$P_Value), ]
+print(head(drugs_pvalue, 20))
+# -------------------------------------------------------
+# Select significant drugs (P < 0.05)
+# -------------------------------------------------------
+
+significant_drugs <- drugs_pvalue[drugs_pvalue$P_Value < 0.05, "Drug"]
+insignificant_drugs <- setdiff(drugs, significant_drugs)
+print(significant_drugs)
+
+diab <- diab[, !names(diab) %in% insignificant_drugs]
+diab <- diab[, !names(diab) %in% insignificant_drugs]
+
+# -------------------------------------------------------
+# Lasso
+# -------------------------------------------------------
+# remove Y
+exclude_cols <- c("readmit_binary")
+X_lasso <- model.matrix( ~ . - 1, data = diab[, !names(diab) %in% exclude_cols])
+Y_lasso <- as.numeric(diab$readmit_binary) - 1
+print(dim(X_lasso))
+
+set.seed(123)
+cv_lasso <- cv.glmnet(
+  x = X_lasso, 
+  y = Y_lasso, 
+  family = "binomial", # 
+  alpha = 1,           # alpha=1 Lasso (alpha=0  Ridge)
+  type.measure = "auc", # 
+  nfolds = 5           # 5 pile validation
 )
 
-# Suppression
-diab <- dplyr::select(diab, -dplyr::any_of(cols_to_remove))
+pdf("plots/Lasso_Selection_Path.pdf", width = 10, height = 6)
+plot(cv_lasso)
+title("Lasso Cross-Validation Path (AUC)", line = 2.5)
+dev.off()
 
+# Best Lambda
+best_lambda <- cv_lasso$lambda.min
+cat("Lasso Best Lambda:", best_lambda, "\n")
+cat("Lasso Biggest AUC:", max(cv_lasso$cvm), "\n")
 
-# Vérification
-cat("Dimensions après suppression:", dim(diab), "\n")
-View(diab)
+lasso_coefs <- coef(cv_lasso, s = best_lambda)
+lasso_df <- data.frame(
+  Feature = rownames(lasso_coefs),
+  Coefficient = as.numeric(lasso_coefs)
+)
 
+selected_feats <- lasso_df[lasso_df$Coefficient != 0 & lasso_df$Feature != "(Intercept)", ]
 
+selected_feats$Abs_Coef <- abs(selected_feats$Coefficient)
+selected_feats <- selected_feats[order(selected_feats$Abs_Coef, decreasing = TRUE), ]
+
+print(head(selected_feats, 30))
+# -------------------------------------------------------
+# PCA
+# -------------------------------------------------------
 sig_knn <- subset(resultats_knn, Significatif == TRUE)$Variable
 sig_knn <- intersect(sig_knn, names(diab))
-
 
 # Identify Variables
 vars_num <- intersect(
